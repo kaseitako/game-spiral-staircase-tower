@@ -14,19 +14,32 @@ export const STORAGE_KEY = 'still-tower.walk.v1';
 const ROOM_LIMIT = 10_000_000;
 const SOURCE_SPAN = ROOM_LIMIT * 2 + 1;
 export const MAX_CYCLE = 1_000_000;
+// 28 bits leave room for the room number in an exact JavaScript integer.
+// Seeds 0..MAX_CYCLE are reserved for worlds from saves made before v5.
+export const MAX_SEED = 0x0fffffff;
 export interface Realm {
   cycle: number;
+  seed: number;
+  usedSeeds: number[];
   home: number | null;
   /** Kept until the next return, even if the player chooses a different home. */
-  preserved: { room: number; cycle: number } | null;
+  preserved: { room: number; cycle: number; seed: number } | null;
 }
-export const initialRealm = (): Realm => ({ cycle: 0, home: null, preserved: null });
+function newSeed(usedSeeds: readonly number[]): number {
+  const buffer = new Uint32Array(1);
+  let seed: number;
+  do { seed = crypto.getRandomValues(buffer)[0] & MAX_SEED; }
+  while (seed <= MAX_CYCLE || usedSeeds.includes(seed));
+  return seed;
+}
+export const initialRealm = (seed = newSeed([])): Realm => ({ cycle: 0, seed, usedSeeds: seed > MAX_CYCLE ? [seed] : [], home: null, preserved: null });
 export const roomCycle = (room: number, realm?: Realm): number => realm?.preserved?.room === room ? realm.preserved.cycle : realm?.cycle ?? 0;
-/** Item identity includes the original tower, so carried finds never change or collide. */
-export const itemSource = (room: number, realm?: Realm): number => roomCycle(room, realm) * SOURCE_SPAN + room;
-export const sourceCycle = (source: number): number => Math.floor((source + ROOM_LIMIT) / SOURCE_SPAN);
-export const sourceRoom = (source: number): number => source - sourceCycle(source) * SOURCE_SPAN;
-const sourceKey = (source: number): number => sourceCycle(source) === 0 ? sourceRoom(source) : sourceRoom(source) ^ roomSeed(sourceCycle(source) ^ 0x7f4a7c15);
+export const roomSeedId = (room: number, realm?: Realm): number => realm?.preserved?.room === room ? realm.preserved.seed : realm?.seed ?? 0;
+/** Finds retain their original seed even after their tower has disappeared. */
+export const itemSource = (room: number, realm?: Realm): number => roomSeedId(room, realm) * SOURCE_SPAN + room;
+export const sourceSeed = (source: number): number => Math.floor((source + ROOM_LIMIT) / SOURCE_SPAN);
+export const sourceRoom = (source: number): number => source - sourceSeed(source) * SOURCE_SPAN;
+const sourceKey = (source: number): number => sourceSeed(source) === 0 ? sourceRoom(source) : sourceRoom(source) ^ roomSeed(sourceSeed(source) ^ 0x7f4a7c15);
 export const roomKey = (room: number, realm?: Realm): number => sourceKey(itemSource(room, realm));
 
 export type Place = 'stairs' | 'room' | 'rest';
@@ -55,7 +68,7 @@ export interface Preferences {
   quality: 'standard' | 'light';
 }
 export interface SavedWalk {
-  version: 4;
+  version: 5;
   state: WalkState;
   preferences: Preferences;
   visitedRooms: number[];
@@ -88,7 +101,7 @@ export function roomSeed(room: number): number {
 }
 
 export function roomKind(room: number, realm?: Realm): RoomKind {
-  if (room === 0 && roomCycle(room, realm) === 0) return 'shelter';
+  if (room === 0 && roomSeedId(room, realm) === 0) return 'shelter';
   const key = roomKey(room, realm);
   const story = roomSeed(key ^ 0x68bc21eb) % 10;
   if (story < 4) return (['ruin', 'camp', 'dining', 'mending'] as const)[story];
@@ -102,7 +115,7 @@ export function roomDesign(room: number, realm?: Realm) {
     kind: roomKind(room, realm),
     palette: seed % 4,
     layout: (seed >>> 5) % 3,
-    window: (room === 0 && roomCycle(room, realm) === 0) || seed % 5 > 1 ? 'none' as const : seed % 5 === 0 ? 'wide' as const : 'tall' as const,
+    window: (room === 0 && roomSeedId(room, realm) === 0) || seed % 5 > 1 ? 'none' as const : seed % 5 === 0 ? 'wide' as const : 'tall' as const,
     details: seed >>> 8,
   };
 }
@@ -181,7 +194,7 @@ export function accessoryFind(room: number, accessories: Accessory[], realm?: Re
   return hasAccessory(source) && !accessories.some((item) => item.source === source) ? { source, worn: false } : null;
 }
 
-export const itemKind = (source: number): ItemKind => ITEM_KINDS[(((sourceRoom(source) + sourceCycle(source)) % 3) + 3) % 3];
+export const itemKind = (source: number): ItemKind => ITEM_KINDS[(((sourceRoom(source) + sourceSeed(source)) % 3) + 3) % 3];
 export const roomFind = (room: number, keepsakes: Keepsake[], realm?: Realm): Keepsake | null =>
   keepsakes.some((item) => item.source === itemSource(room, realm)) ? null : { source: itemSource(room, realm), room, lit: false };
 export const canPlace = (item: Keepsake, room: number, keepsakes: Keepsake[]): boolean =>
@@ -205,10 +218,14 @@ export function visibleChunks(anchor: number): number[] {
 export function renewTower(saved: SavedWalk): SavedWalk {
   const home = saved.realm.home;
   if (home === null || saved.realm.cycle >= MAX_CYCLE) return { ...saved, returning: false };
+  const seed = newSeed(saved.realm.usedSeeds);
   return {
     ...saved, returning: false,
     state: { ...initialState(), place: 'room', room: home, steps: home * STEPS_PER_ROOM, x: 0.95, z: 0 },
-    realm: { cycle: saved.realm.cycle + 1, home, preserved: { room: home, cycle: roomCycle(home, saved.realm) } },
+    realm: {
+      cycle: saved.realm.cycle + 1, seed, usedSeeds: [...saved.realm.usedSeeds, seed], home,
+      preserved: { room: home, cycle: roomCycle(home, saved.realm), seed: roomSeedId(home, saved.realm) },
+    },
     visitedRooms: [home],
     keepsakes: saved.keepsakes.map((item) => item.room === null || item.room === home ? { ...item } : { ...item, room: 'lost', lit: false }),
     accessories: saved.accessories.map((item) => ({ ...item })),
@@ -220,7 +237,7 @@ export function parseSave(raw: string | null): SavedWalk | null {
   try {
     const saved = JSON.parse(raw);
     const s = saved?.state;
-    if (![1, 2, 3, 4].includes(saved?.version) || !s || !['stairs', 'room', 'rest'].includes(s.place)) return null;
+    if (![1, 2, 3, 4, 5].includes(saved?.version) || !s || !['stairs', 'room', 'rest'].includes(s.place)) return null;
     if (![s.steps, s.direction, s.room, s.x, s.z].every((n) => typeof n === 'number' && Number.isFinite(n))) return null;
     if (Math.abs(s.steps) > 1e9 || !Number.isSafeInteger(s.room) || Math.abs(s.room) > 1e7) return null;
     if (s.direction !== 1 && s.direction !== -1) return null;
@@ -237,22 +254,38 @@ export function parseSave(raw: string | null): SavedWalk | null {
     const occupied = new Set<string>();
     const validRoom = (id: unknown): id is number => typeof id === 'number' && Number.isSafeInteger(id) && Math.abs(id) <= 1e7;
     const validCycle = (cycle: unknown): cycle is number => typeof cycle === 'number' && Number.isSafeInteger(cycle) && cycle >= 0 && cycle <= MAX_CYCLE;
-    const realm = initialRealm();
-    if (saved.version === 4) {
+    const validSeed = (seed: unknown): seed is number => typeof seed === 'number' && Number.isSafeInteger(seed) && seed >= 0 && seed <= MAX_SEED;
+    // Preserve the exact layouts and item identities of older saves. Randomness
+    // starts at their next return, rather than changing rooms during migration.
+    const realm = initialRealm(0);
+    if (saved.version >= 4) {
       const r = saved.realm;
       if (!r || !validCycle(r.cycle) || !(r.home === null || validRoom(r.home))) return null;
       realm.cycle = r.cycle;
       realm.home = r.home;
+      realm.seed = r.cycle;
+      if (saved.version === 5) {
+        if (!validSeed(r.seed) || !Array.isArray(r.usedSeeds) || r.usedSeeds.length > r.cycle + 1
+          || !r.usedSeeds.every((seed: unknown) => validSeed(seed) && seed > MAX_CYCLE)
+          || new Set(r.usedSeeds).size !== r.usedSeeds.length) return null;
+        realm.seed = r.seed;
+        realm.usedSeeds = [...r.usedSeeds];
+        if (r.seed <= MAX_CYCLE ? r.seed !== r.cycle : !realm.usedSeeds.includes(r.seed)) return null;
+      }
       if (r.preserved !== null) {
         if (!r.preserved || !validRoom(r.preserved.room) || !validCycle(r.preserved.cycle) || r.preserved.cycle > r.cycle) return null;
-        realm.preserved = { room: r.preserved.room, cycle: r.preserved.cycle };
+        const seed = saved.version === 5 ? r.preserved.seed : r.preserved.cycle;
+        if (!validSeed(seed) || (seed <= MAX_CYCLE ? seed !== r.preserved.cycle : !realm.usedSeeds.includes(seed))) return null;
+        realm.preserved = { room: r.preserved.room, cycle: r.preserved.cycle, seed };
       }
     }
+    const usedSeeds = new Set(realm.usedSeeds);
     const validSource = (source: unknown): source is number => typeof source === 'number' && Number.isSafeInteger(source)
-      && source >= -ROOM_LIMIT && source <= realm.cycle * SOURCE_SPAN + ROOM_LIMIT;
+      && source >= -ROOM_LIMIT && source <= MAX_SEED * SOURCE_SPAN + ROOM_LIMIT
+      && (sourceSeed(source) <= MAX_CYCLE ? sourceSeed(source) <= realm.cycle : usedSeeds.has(sourceSeed(source)));
     if (saved.version >= 2 && Array.isArray(saved.keepsakes)) for (const item of saved.keepsakes) {
       if (!item || !validSource(item.source) || sources.has(item.source)) continue;
-      let room: Keepsake['room'] = saved.version === 4 && item.room === 'lost' ? 'lost' : validRoom(item.room) ? item.room : null;
+      let room: Keepsake['room'] = saved.version >= 4 && item.room === 'lost' ? 'lost' : validRoom(item.room) ? item.room : null;
       const slot = `${room}:${itemKind(item.source)}`;
       // Repair duplicate placements without throwing away a collected item.
       if (typeof room === 'number' && occupied.has(slot)) room = null;
@@ -272,7 +305,7 @@ export function parseSave(raw: string | null): SavedWalk | null {
       accessories.push({ source: item.source, worn });
     }
     return {
-      version: 4,
+      version: 5,
       state: { steps: s.steps * STEPS_PER_ROOM / savedSpacing, direction: s.direction, room: s.room, place: s.place, x: s.x, z: s.z },
       preferences: {
         pace: saved.preferences?.pace === 'fast' ? 'fast' : saved.preferences?.pace === 'normal' ? 'normal' : 'slow',
@@ -282,7 +315,7 @@ export function parseSave(raw: string | null): SavedWalk | null {
       keepsakes,
       accessories,
       realm,
-      returning: saved.version === 4 && saved.returning === true && realm.home !== null,
+      returning: saved.version >= 4 && saved.returning === true && realm.home !== null,
     };
   } catch { return null; }
 }

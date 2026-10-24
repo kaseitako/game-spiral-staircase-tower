@@ -8,7 +8,7 @@ import {
   ACCESSORY_NAMES, ITEM_NAMES, WALK_SPEED, accessoryFind, accessoryKind, canEnter, canPlace, constrainRoomPosition, defaultPreferences, initialState, itemKind, nearestRoom,
   initialRealm, itemSource, parseSave, renewTower, roomDesign, roomFind, roomKind, roomNumber, roomWindow, stairPose,
 } from './model.ts';
-import type { Accessory, Keepsake, LookMode, Preferences, SavedWalk, WalkState } from './model.ts';
+import type { Accessory, Keepsake, LookMode, Preferences, Realm, SavedWalk, WalkState } from './model.ts';
 
 export interface GameFrame {
   state: WalkState;
@@ -46,7 +46,7 @@ export class TowerGame {
   readonly visitedRooms = new Set<number>();
   readonly keepsakes: Keepsake[] = [];
   readonly accessories: Accessory[] = [];
-  readonly realm = initialRealm();
+  readonly realm: Realm;
   private fall: { elapsed: number; steps: number; returned: boolean } | null = null;
   reading: number | null = null;
   tea = false;
@@ -73,22 +73,21 @@ export class TowerGame {
   private readonly pageHideHandler = () => this.save();
 
   constructor(private readonly container: HTMLElement) {
+    let saved: SavedWalk | null = null;
     try {
       const loaded = parseSave(localStorage.getItem(STORAGE_KEY));
-      const saved = loaded?.returning ? renewTower(loaded) : loaded;
-      if (saved) {
-        Object.assign(this.realm, saved.realm);
-        this.state = saved.state;
-        this.preferences = saved.preferences;
-        for (const id of saved.visitedRooms) this.visitedRooms.add(id);
-        this.keepsakes.push(...saved.keepsakes);
-        this.accessories.push(...saved.accessories);
-        if (this.state.place === 'room') Object.assign(this.state, constrainRoomPosition(this.state.room, this.state.x, this.state.z, this.realm));
-        this.hasSave = true;
-        // A refresh during a fall completes the same return once, without replaying it.
-        if (loaded?.returning) localStorage.setItem(STORAGE_KEY, JSON.stringify(saved));
-      }
+      saved = loaded?.returning ? renewTower(loaded) : loaded;
     } catch { this.canSave = false; }
+    this.realm = saved?.realm ?? initialRealm();
+    if (saved) {
+      this.state = saved.state;
+      this.preferences = saved.preferences;
+      for (const id of saved.visitedRooms) this.visitedRooms.add(id);
+      this.keepsakes.push(...saved.keepsakes);
+      this.accessories.push(...saved.accessories);
+      if (this.state.place === 'room') Object.assign(this.state, constrainRoomPosition(this.state.room, this.state.x, this.state.z, this.realm));
+      this.hasSave = true;
+    }
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: 'high-performance' });
     this.renderer.domElement.setAttribute('aria-label', '白い霧の中に続く塔と螺旋階段。WとSで上り下り、入口でE。');
@@ -122,6 +121,9 @@ export class TowerGame {
     this.resize();
     window.addEventListener('pagehide', this.pageHideHandler);
     document.addEventListener('visibilitychange', this.visibilityHandler);
+    // Persist the first seed immediately, also completing migrations or a
+    // pending return exactly once if the page was reloaded during a fall.
+    this.save();
     this.raf = requestAnimationFrame(this.tick);
   }
 
@@ -561,7 +563,7 @@ export class TowerGame {
   };
 
   private savedWalk(): SavedWalk {
-    return { version: 4, state: this.state, preferences: this.preferences, visitedRooms: [...this.visitedRooms], keepsakes: this.keepsakes, accessories: this.accessories, realm: this.realm, returning: Boolean(this.fall && !this.fall.returned) };
+    return { version: 5, state: this.state, preferences: this.preferences, visitedRooms: [...this.visitedRooms], keepsakes: this.keepsakes, accessories: this.accessories, realm: this.realm, returning: Boolean(this.fall && !this.fall.returned) };
   }
 
   save(): void {
