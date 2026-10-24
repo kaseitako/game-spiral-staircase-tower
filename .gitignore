@@ -1,0 +1,39 @@
+# Dependencies and production builds
+node_modules/
+dist/
+
+# Generated test output and caches
+test-results/
+playwright-report/
+playwright/.cache/
+coverage/
+.vite/
+*.tsbuildinfo
+
+# Local design notes, screenshots, and development checks
+/docs/
+/tests/
+/playwright.config.ts
+
+# Local environment files and credentials
+.env
+.env.*
+!.env.example
+*.local
+.npmrc
+*.pem
+*.key
+*.p12
+*.pfx
+.aws/
+
+# Local agent and editor settings
+.codex/
+.agents/
+.vscode/
+.idea/
+
+# Logs and operating system files
+*.log
+.DS_Store
+Thumbs.db
