@@ -99,11 +99,22 @@ h1 { font-family: "Yu Mincho", "Hiragino Mincho ProN", "Noto Serif JP", serif; f
 .room-discovery { position: absolute; top: 110px; left: 36px; border: 1px solid #9eaa9345; border-radius: 4px; padding: 13px 16px; background: #eef0e6d9; text-align: left; pointer-events: auto; font-size: 11px; line-height: 1.6; backdrop-filter: blur(8px); }
 .room-discovery small { display: block; margin-top: 6px; font-size: 9px; color: #76806b; }
 .room-discovery kbd { margin-left: 7px; height: 18px; min-width: 18px; font-size: 9px; }
-.belongings { position: absolute; top: 110px; bottom: 136px; left: 36px; width: 300px; z-index: 3; padding: 22px; overflow-y: auto; border: 1px solid #b3bca877; border-radius: 5px; background: #edf0e6f5; box-shadow: 0 8px 35px #3c4a3220; pointer-events: auto; backdrop-filter: blur(12px); }
+.belongings { position: absolute; top: 110px; bottom: 136px; left: 36px; width: 320px; z-index: 3; padding: 22px; overflow-y: auto; border: 1px solid #b3bca877; border-radius: 5px; background: #edf0e6f5; box-shadow: 0 8px 35px #3c4a3220; pointer-events: auto; backdrop-filter: blur(12px); }
 .belongings-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
 .belongings-heading .eyebrow { font-size: 8px; }
 .belongings-heading p { margin: 7px 0 0; font-family: "Yu Mincho", serif; font-size: 19px; letter-spacing: .1em; }
 .belongings-heading > button { border: 0; background: none; font-size: 24px; padding: 4px 6px; color: #7b8870; }
+.wallet { display: flex; align-items: baseline; gap: 6px; margin: -8px 0 20px; padding: 10px 12px; font-size: 10px; background: #dbdfce80; border: 1px solid #9aa68b30; border-radius: 3px; }
+.wallet strong { margin-left: auto; font: 17px ui-monospace, monospace; color: #6c7555; }
+.npc-words { font-family: "Yu Mincho", serif; font-size: 12px; line-height: 2; margin: 12px 0; }
+.expansion { padding: 12px 0; border-bottom: 1px solid #9aa68b30; }
+.expansion strong { font-weight: 500; font-size: 11px; }
+.expansion p { font-size: 10px; line-height: 1.8; color: #7a866e; margin: 7px 0; }
+.trade-bulk { margin: 16px 0 24px; }
+.trade-bulk button { width: 100%; border: 1px solid #607357; border-radius: 3px; padding: 10px; font-size: 10px; background: #607357; color: #f1f2e8; }
+.trade-bulk button:disabled { cursor: default; opacity: .45; }
+.trade-bulk small { display: block; margin-top: 8px; font-size: 9px; line-height: 1.8; color: #7a866e; }
+.trade-notice { padding: 10px 12px; border-left: 2px solid #84916e; background: #e2e8d6; font-size: 10px; line-height: 1.8; }
 .belongings h2 { display: flex; justify-content: space-between; margin: 22px 0 10px; font-size: 11px; font-weight: 500; letter-spacing: .06em; }
 .belongings h2 span { font: 9px ui-monospace, monospace; color: #7c8772; }
 .keepsake { display: flex; gap: 12px; padding: 12px 0; border-bottom: 1px solid #9aa68b30; }

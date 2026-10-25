@@ -7,7 +7,7 @@ const DOOR_HALF_WIDTH = 0.265;
 type Point = [number, number, number];
 
 /** Matching vertical facets keep the tower continuous, with actual holes in both wall faces. */
-export function createWallGeometries(window: RoomWindow | null) {
+export function createWallGeometries(window: RoomWindow | null, interiorHeight = WALL_HEIGHT) {
   const outside: number[] = [], inside: number[] = [], reveals: number[] = [];
   const at = (radius: number, angle: number, y: number): Point => [Math.cos(angle) * radius, y, Math.sin(angle) * radius];
   const quad = (target: number[], a: Point, b: Point, c: Point, d: Point) => target.push(...a, ...b, ...c, ...a, ...c, ...d);
@@ -23,8 +23,8 @@ export function createWallGeometries(window: RoomWindow | null) {
     const spans = door ? [[WALL_HEIGHT, ROOM_HEIGHT]] : opening ? [[0, opening.bottom], [opening.top, ROOM_HEIGHT]] : [[0, ROOM_HEIGHT]];
     for (const [bottom, top] of spans) {
       quad(outside, at(TOWER_RADIUS, a, bottom), at(TOWER_RADIUS, a, top), at(TOWER_RADIUS, b, top), at(TOWER_RADIUS, b, bottom));
-      if (bottom < WALL_HEIGHT) {
-        const innerTop = Math.min(top, WALL_HEIGHT);
+      if (bottom < interiorHeight) {
+        const innerTop = Math.min(top, interiorHeight);
         quad(inside, at(INNER_RADIUS, b, bottom), at(INNER_RADIUS, b, innerTop), at(INNER_RADIUS, a, innerTop), at(INNER_RADIUS, a, bottom));
       }
     }

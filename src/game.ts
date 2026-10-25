@@ -3,12 +3,13 @@ import { Character } from './character.ts';
 import { Atmosphere } from './atmosphere.ts';
 import { ROOM_NAMES, SEAT, TowerWorld } from './world.ts';
 import { RETURN_AT, RETURN_END, fallPose, whiteoutAt } from './return.ts';
+import { KIT_NAMES, buyKit, duplicates, installKit, sellFind } from './trade.ts';
 import {
-  INNER_RADIUS, ROOM_HEIGHT, STEP_HEIGHT, STEP_LENGTH, STEPS_PER_ROOM, STORAGE_KEY, TOWER_RADIUS, MAX_CYCLE,
+  BALCONY, INNER_RADIUS, LADDER, LOFT_SEAT, LOFT_Y, ROOM_HEIGHT, STEP_HEIGHT, STEP_LENGTH, STEPS_PER_ROOM, STORAGE_KEY, TOWER_RADIUS, MAX_CYCLE,
   ACCESSORY_NAMES, ITEM_NAMES, WALK_SPEED, accessoryFind, accessoryKind, canEnter, canPlace, constrainRoomPosition, defaultPreferences, initialState, itemKind, nearestRoom,
-  initialRealm, itemSource, parseSave, renewTower, roomDesign, roomFind, roomKind, roomNumber, roomWindow, stairPose,
+  initialRealm, initialTrade, itemSource, parseSave, renewTower, roomDesign, roomFind, roomKind, roomNpc, roomNumber, roomWindow, stairPose,
 } from './model.ts';
-import type { Accessory, Keepsake, LookMode, Preferences, Realm, SavedWalk, WalkState } from './model.ts';
+import type { Accessory, Keepsake, Kit, LookMode, Preferences, Realm, SavedWalk, WalkState } from './model.ts';
 
 export interface GameFrame {
   state: WalkState;
@@ -27,7 +28,7 @@ export interface GameFrame {
   falling: boolean;
   whiteout: number;
 }
-interface Transition { from: THREE.Vector3; to: THREE.Vector3; time: number; duration: number }
+interface Transition { from: THREE.Vector3; to: THREE.Vector3; time: number; duration: number; via?: THREE.Vector3[] }
 
 export class TowerGame {
   readonly scene = new THREE.Scene();
@@ -47,6 +48,8 @@ export class TowerGame {
   readonly keepsakes: Keepsake[] = [];
   readonly accessories: Accessory[] = [];
   readonly realm: Realm;
+  readonly trade = initialTrade();
+  private conversationIndex = 0;
   private fall: { elapsed: number; steps: number; returned: boolean } | null = null;
   reading: number | null = null;
   tea = false;
@@ -80,12 +83,13 @@ export class TowerGame {
     } catch { this.canSave = false; }
     this.realm = saved?.realm ?? initialRealm();
     if (saved) {
+      Object.assign(this.trade, saved.trade);
       this.state = saved.state;
       this.preferences = saved.preferences;
       for (const id of saved.visitedRooms) this.visitedRooms.add(id);
       this.keepsakes.push(...saved.keepsakes);
       this.accessories.push(...saved.accessories);
-      if (this.state.place === 'room') Object.assign(this.state, constrainRoomPosition(this.state.room, this.state.x, this.state.z, this.realm));
+      if (this.state.place === 'room') Object.assign(this.state, constrainRoomPosition(this.state.room, this.state.x, this.state.z, this.realm, this.trade));
       this.hasSave = true;
     }
 
@@ -108,12 +112,12 @@ export class TowerGame {
     this.sunlight.shadow.normalBias = 0.035;
     this.sunlight.shadow.bias = -0.00015;
     this.scene.add(this.sunlight, this.sunlight.target, this.character.group);
-    this.world = new TowerWorld(this.scene, this.realm);
+    this.world = new TowerWorld(this.scene, this.realm, this.trade);
     this.world.setKeepsakes(this.keepsakes);
     this.world.setAccessories(this.accessories);
     this.character.setAccessories(this.accessories);
     this.cameraDirection = this.state.direction;
-    this.roomBlend = this.state.place === 'stairs' ? 0 : 1;
+    this.roomBlend = this.state.place === 'stairs' || this.state.place === 'balcony' ? 0 : 1;
     this.applyQuality();
     container.append(this.renderer.domElement);
     this.resizeObserver = new ResizeObserver(() => this.resize());
@@ -138,8 +142,98 @@ export class TowerGame {
 
   markHome(): void {
     if (!this.canHandleItems || this.state.place === 'stairs' || this.realm.home === this.state.room) return;
+    const oldHome = this.realm.home;
+    const kept = new Set<string>();
+    for (const item of this.keepsakes) {
+      if (oldHome === null || item.room !== oldHome) continue;
+      const kind = itemKind(item.source);
+      if (kept.has(kind)) { item.room = null; item.lit = false; }
+      kept.add(kind);
+    }
     this.realm.home = this.state.room;
-    this.tell(`ROOM ${roomNumber(this.state.room)} を、自分の家にしました。`);
+    this.world.rebuild();
+    this.firstFrame = true;
+    this.tell(`ROOM ${roomNumber(this.state.room)} を、自分の家にしました。${oldHome !== null && this.trade.shelves ? '増設した棚の品も持ち物に戻しました。' : ''}`);
+    this.save();
+  }
+
+  get npc() { return ['room', 'rest'].includes(this.state.place) ? roomNpc(this.state.room, this.realm) : null; }
+  get conversation(): string { const npc = this.npc; return npc ? npc.lines[this.conversationIndex % npc.lines.length] : ''; }
+  get duplicateFinds() { return duplicates(this.savedWalk()); }
+
+  speak(): void {
+    if (!this.canHandleItems || !this.npc) return;
+    this.conversationIndex++;
+    this.tell(this.conversation);
+  }
+
+  private applyTrade(saved: SavedWalk, rebuild = false): void {
+    Object.assign(this.trade, saved.trade);
+    this.keepsakes.splice(0, this.keepsakes.length, ...saved.keepsakes);
+    this.accessories.splice(0, this.accessories.length, ...saved.accessories);
+    if (rebuild) { this.world.rebuild(); this.firstFrame = true; }
+    else { this.world.setKeepsakes(this.keepsakes); this.world.setAccessories(this.accessories); }
+    this.character.setAccessories(this.accessories);
+    this.save();
+  }
+
+  sell(source: number, accessory = false): void {
+    if (!this.canHandleItems) return;
+    const next = sellFind(this.savedWalk(), source, accessory);
+    if (!next) return;
+    const amount = next.trade.coins - this.trade.coins;
+    this.applyTrade(next);
+    this.tea = false;
+    this.tell(`${amount} 枚のコインと交換しました。`);
+  }
+
+  sellDuplicates(): void {
+    if (!this.canHandleItems) return;
+    let next = this.savedWalk();
+    let count = 0;
+    for (const item of duplicates(next)) {
+      const sold = sellFind(next, item.source, item.accessory);
+      if (sold) { next = sold; count++; }
+    }
+    if (!count) return;
+    const amount = next.trade.coins - this.trade.coins;
+    this.applyTrade(next);
+    this.tell(`${count} 個を売り、${amount} 枚のコインを受け取りました。`);
+  }
+
+  buy(kit: Kit): void {
+    if (!this.canHandleItems) return;
+    const next = buyKit(this.savedWalk(), kit);
+    if (!next) return;
+    this.applyTrade(next);
+    this.tell(`${KIT_NAMES[kit]}を買いました。自分の家で設置できます。`);
+  }
+
+  install(kit: Kit): void {
+    if (!this.canHandleItems) return;
+    const next = installKit(this.savedWalk(), kit);
+    if (!next) return;
+    this.applyTrade(next, true);
+    this.tell(kit === 'shelf' ? '棚を継ぎ足しました。飾れる品が増えました。' : kit === 'loft' ? 'はしごの先に、小さな居場所ができました。' : '外壁に板を継ぎ足しました。白い靄の中へ出られます。');
+  }
+
+  useExtension(place: 'room' | 'loft' | 'balcony'): void {
+    if (!this.canHandleItems || this.realm.home !== this.state.room || this.state.place === 'stairs') return;
+    if (place === 'room' ? !['loft', 'balcony'].includes(this.state.place) : !['room', 'rest'].includes(this.state.place)) return;
+    if (place !== 'room' && !this.trade[place]) return;
+    const from = this.playerPosition();
+    const previous = this.state.place;
+    this.state.place = place;
+    Object.assign(this.state, place === 'loft' ? LOFT_SEAT : place === 'balcony' ? { x: BALCONY.x, z: BALCONY.z } : previous === 'loft' ? { x: 1.30, z: -0.45 } : { x: 0.95, z: 0 });
+    const y = this.state.room * ROOM_HEIGHT - this.origin;
+    const via = place === 'loft' || previous === 'loft'
+      ? [new THREE.Vector3(LADDER.x + 0.20, y, LADDER.z), new THREE.Vector3(0.73, y + LOFT_Y, LADDER.z)]
+      : [new THREE.Vector3(1.70, y, 0), new THREE.Vector3(3.4, y, 0)];
+    if (place === 'room') via.reverse();
+    this.transition = { from, to: this.playerPosition(), time: 0, duration: place === 'loft' || previous === 'loft' ? 2.7 : 1.8, via };
+    this.tea = false;
+    this.velocity = 0;
+    this.input.clear();
     this.save();
   }
 
@@ -239,7 +333,7 @@ export class TowerGame {
   toggleAccessory(source: number): void {
     if (!this.canHandleItems) return;
     const item = this.accessories.find((entry) => entry.source === source);
-    if (!item) return;
+    if (!item || item.sold) return;
     const worn = !item.worn;
     const kind = accessoryKind(source);
     for (const other of this.accessories) if (accessoryKind(other.source) === kind) other.worn = false;
@@ -252,7 +346,7 @@ export class TowerGame {
   placeKeepsake(source: number): void {
     if (!this.canHandleItems || this.state.place === 'stairs') return;
     const item = this.keepsakes.find((entry) => entry.source === source);
-    if (!item || !canPlace(item, this.state.room, this.keepsakes)) return;
+    if (!item || !canPlace(item, this.state.room, this.keepsakes, this.realm, this.trade)) return;
     item.room = this.state.room;
     if (itemKind(source) === 'cup') this.tea = false;
     this.world.setKeepsakes(this.keepsakes);
@@ -285,7 +379,8 @@ export class TowerGame {
   drinkTea(): void {
     if (!this.canHandleItems || this.state.place === 'stairs') return;
     if (!this.keepsakes.some((item) => itemKind(item.source) === 'cup' && (item.room === null || item.room === this.state.room))) return;
-    if (this.state.place !== 'rest') {
+    if (this.state.place === 'balcony') return;
+    if (this.state.place !== 'rest' && this.state.place !== 'loft') {
       const from = this.character.group.position.clone();
       this.state.place = 'rest';
       this.state.x = SEAT.x;
@@ -317,7 +412,11 @@ export class TowerGame {
   get action(): string | null {
     if (this.transition || this.fall || this.looking || this.reading !== null) return null;
     if (this.state.place === 'stairs') return canEnter(this.state.steps) ? '部屋に入る' : null;
+    if (this.state.place === 'loft') return 'はしごを降りる';
+    if (this.state.place === 'balcony') return '部屋に戻る';
     if (this.state.place === 'rest') return '立ち上がる';
+    if (this.npc && Math.hypot(this.state.x - this.npc.x, this.state.z - this.npc.z) < 0.9) return this.npc.kind === 'merchant' ? '商人と話す' : '話しかける';
+    if (this.realm.home === this.state.room && this.trade.loft && Math.hypot(this.state.x - LADDER.x, this.state.z - LADDER.z) < 0.48) return 'ロフトに上がる';
     if (Math.hypot(this.state.x - SEAT.x, this.state.z - SEAT.z) < 1.03) return '腰をおろす';
     if (Math.hypot(this.state.x - 1.75, this.state.z) < 1.04) return '階段に戻る';
     return null;
@@ -327,6 +426,9 @@ export class TowerGame {
     if (!this.running || this.transition) return;
     const action = this.action;
     if (!action) return;
+    if (action === '商人と話す' || action === '話しかける') { this.speak(); return; }
+    if (action === 'ロフトに上がる') { this.useExtension('loft'); return; }
+    if (this.state.place === 'loft' || this.state.place === 'balcony') { this.useExtension('room'); return; }
     const from = this.character.group.position.clone();
     if (this.state.place === 'stairs') {
       this.state.room = nearestRoom(this.state.steps);
@@ -335,6 +437,7 @@ export class TowerGame {
       this.state.place = 'room';
       this.state.x = 0.95;
       this.state.z = 0;
+      this.conversationIndex = 0;
       const found = roomFind(this.state.room, this.keepsakes, this.realm);
       const accessory = accessoryFind(this.state.room, this.accessories, this.realm);
       this.tell(accessory ? `${ACCESSORY_NAMES[accessoryKind(accessory.source)]}を見つけた。Q で部屋のものを見てみよう。` : found ? `${ITEM_NAMES[itemKind(found.source)]}が置いてある。Q で部屋のものを見てみよう。` : '以前ここに置いたものは、そのまま残っている。');
@@ -366,11 +469,11 @@ export class TowerGame {
       const p = stairPose(this.state.steps, this.origin);
       return new THREE.Vector3(p.x, p.y, p.z);
     }
-    return new THREE.Vector3(this.state.x, this.state.room * ROOM_HEIGHT - this.origin, this.state.z);
+    return new THREE.Vector3(this.state.x, this.state.room * ROOM_HEIGHT - this.origin + (this.state.place === 'loft' ? LOFT_Y : 0), this.state.z);
   }
 
   private move(dt: number): number {
-    if (!this.running || this.transition || this.fall || this.state.place === 'rest' || this.reading !== null) return 0;
+    if (!this.running || this.transition || this.fall || this.state.place === 'rest' || this.state.place === 'loft' || this.reading !== null) return 0;
     const forward = Number(this.input.has('up')) - Number(this.input.has('down'));
     const side = Number(this.input.has('right')) - Number(this.input.has('left'));
     if (this.looking) {
@@ -386,9 +489,14 @@ export class TowerGame {
     }
     const length = Math.hypot(forward, side);
     if (!length) return 0;
-    const dx = (-0.85 * forward + 0.527 * side) / length * pace * dt;
-    const dz = (-0.527 * forward - 0.85 * side) / length * pace * dt;
-    const { x, z } = constrainRoomPosition(this.state.room, this.state.x + dx, this.state.z + dz, this.realm);
+    const view = this.state.place === 'balcony'
+      ? new THREE.Vector2(this.target.x - this.camera.position.x, this.target.z - this.camera.position.z).normalize()
+      : new THREE.Vector2(-0.85, -0.527);
+    const dx = (view.x * forward - view.y * side) / length * pace * dt;
+    const dz = (view.y * forward + view.x * side) / length * pace * dt;
+    const { x, z } = this.state.place === 'balcony'
+      ? { x: THREE.MathUtils.clamp(this.state.x + dx, BALCONY.minX, BALCONY.maxX), z: THREE.MathUtils.clamp(this.state.z + dz, BALCONY.minZ, BALCONY.maxZ) }
+      : constrainRoomPosition(this.state.room, this.state.x + dx, this.state.z + dz, this.realm, this.trade);
     this.state.x = x;
     this.state.z = z;
     this.face(Math.atan2(dx, dz), dt);
@@ -416,7 +524,7 @@ export class TowerGame {
       this.camera.lookAt(this.target);
       return;
     }
-    const indoors = this.state.place !== 'stairs';
+    const indoors = this.state.place !== 'stairs' && this.state.place !== 'balcony';
     this.roomBlend = THREE.MathUtils.damp(this.roomBlend, indoors ? 1 : 0, 3.5, dt);
     this.cameraDirection = THREE.MathUtils.damp(this.cameraDirection, this.state.direction, 2.2, dt);
     const p = stairPose(this.state.steps, this.origin);
@@ -425,9 +533,11 @@ export class TowerGame {
     const outside = radial.clone().multiplyScalar(7.1).addScaledVector(tangent, -5.2 * this.cameraDirection);
     outside.y = p.y + 3.35;
     const outsideTarget = new THREE.Vector3(p.x, p.y + 1.04, p.z).addScaledVector(tangent, 0.65 * this.cameraDirection);
+    if (this.state.place === 'balcony') outsideTarget.copy(this.playerPosition()).add(new THREE.Vector3(0, 0.9, 0));
     const roomY = this.state.room * ROOM_HEIGHT - this.origin;
     const inside = new THREE.Vector3(1.82, roomY + 2.39, 1.08);
     const insideTarget = new THREE.Vector3(-0.35 + this.state.x * 0.12, roomY + 0.8, -0.3 + this.state.z * 0.12);
+    if (this.state.place === 'loft') { inside.y = roomY + LOFT_Y + 2.1; insideTarget.y += LOFT_Y; }
     const desired = outside.clone();
     // Pass through the doorway instead of cutting through its side wall.
     const threshold = new THREE.Vector3(3.5, roomY + 2.2, 0);
@@ -445,18 +555,9 @@ export class TowerGame {
       let lookPosition: THREE.Vector3;
       let lookTarget: THREE.Vector3;
       if (indoors) {
-        const window = roomWindow(this.state.room, this.realm);
-        // Look through the room's real window, or through the door in a windowless room.
-        if (window) {
-          const direction = new THREE.Vector3(Math.cos(window.angle), 0, Math.sin(window.angle));
-          lookPosition = direction.clone().multiplyScalar(0.7);
-          lookPosition.y = roomY + 1.64;
-          lookTarget = direction.multiplyScalar(16);
-          lookTarget.y = roomY + 1.58;
-        } else {
-          lookPosition = new THREE.Vector3(-1.4, roomY + 1.65, -0.35);
-          lookTarget = new THREE.Vector3(7, roomY + 1.45, 0);
-        }
+        // The doorway remains the outward view, including rooms with windows.
+        lookPosition = new THREE.Vector3(-1.4, roomY + 1.65, -0.35);
+        lookTarget = new THREE.Vector3(7, roomY + 1.45, 0);
       } else if (this.lookPreset === 'down') {
         lookPosition = radial.clone().multiplyScalar(4.8).addScaledVector(tangent, -0.7 * this.state.direction);
         lookPosition.y = p.y + 3;
@@ -514,12 +615,17 @@ export class TowerGame {
       this.camera.position.y -= shift;
       this.target.y -= shift;
       if (this.transition) { this.transition.from.y -= shift; this.transition.to.y -= shift; }
+      for (const waypoint of this.transition?.via ?? []) waypoint.y -= shift;
     }
     let position = this.playerPosition();
     if (this.transition) {
       if (this.running) this.transition.time += dt;
       const t = Math.min(this.transition.time / this.transition.duration, 1);
-      position = this.transition.from.clone().lerp(this.transition.to, t * t * (3 - 2 * t));
+      const ease = (t: number) => t * t * (3 - 2 * t);
+      const path = [this.transition.from, ...(this.transition.via ?? []), this.transition.to];
+      const progress = t * (path.length - 1);
+      const segment = Math.min(Math.floor(progress), path.length - 2);
+      position = path[segment].clone().lerp(path[segment + 1], ease(progress - segment));
       if (t === 1) this.transition = null;
     }
     this.character.group.position.copy(position);
@@ -528,10 +634,10 @@ export class TowerGame {
     } else if (this.state.place === 'stairs') {
       const p = stairPose(this.state.steps, this.origin);
       this.face(-p.angle + (this.state.direction < 0 ? Math.PI : 0), dt);
-    } else if (this.state.place === 'rest') {
-      this.face(Math.PI / 2, dt);
+    } else if (this.state.place === 'rest' || this.state.place === 'loft') {
+      this.face(this.state.place === 'loft' && this.transition ? -Math.PI / 2 : Math.PI / 2, dt);
     }
-    this.character.animate(this.running ? dt : 0, speed, this.state.place === 'rest', this.tea, Boolean(fall));
+    this.character.animate(this.running ? dt : 0, speed, this.state.place === 'rest' || (this.state.place === 'loft' && !this.transition), this.tea, Boolean(fall));
     this.updateCamera(dt);
     this.atmosphere.update(renderedSteps, position, this.camera, this.running ? dt : 0);
     this.world.illuminate(anchor, this.origin, this.state.place !== 'stairs', this.running ? dt : 0);
@@ -544,7 +650,7 @@ export class TowerGame {
     }
     this.onFrame({
       state: this.state,
-      placeLabel: this.state.place === 'stairs' ? this.atmosphere.name : ROOM_NAMES[roomKind(this.state.room, this.realm)],
+      placeLabel: this.state.place === 'stairs' ? this.atmosphere.name : this.state.place === 'loft' ? '継ぎ足したロフト' : this.state.place === 'balcony' ? '白い靄のベランダ' : ROOM_NAMES[roomKind(this.state.room, this.realm)],
       action: this.action,
       transitioning: Boolean(this.transition || this.fall),
       saving: this.canSave,
@@ -563,7 +669,7 @@ export class TowerGame {
   };
 
   private savedWalk(): SavedWalk {
-    return { version: 5, state: this.state, preferences: this.preferences, visitedRooms: [...this.visitedRooms], keepsakes: this.keepsakes, accessories: this.accessories, realm: this.realm, returning: Boolean(this.fall && !this.fall.returned) };
+    return { version: 6, state: this.state, preferences: this.preferences, visitedRooms: [...this.visitedRooms], keepsakes: this.keepsakes, accessories: this.accessories, realm: this.realm, returning: Boolean(this.fall && !this.fall.returned), trade: this.trade };
   }
 
   save(): void {
@@ -586,6 +692,9 @@ export class TowerGame {
       visitedRooms: [...this.visitedRooms], pace: this.preferences.pace,
       keepsakes: this.keepsakes.map((item) => ({ ...item })), tea: this.tea, reading: this.reading,
       accessories: this.accessories.map((item) => ({ ...item })),
+      trade: structuredClone(this.trade), npc: this.npc,
+      builtNpc: this.world.chunks.get(this.state.room)?.npc?.name ?? null,
+      homeFeatures: { loft: Boolean(this.world.chunks.get(this.state.room)?.interior.getObjectByName('home-loft')), balcony: Boolean(this.world.chunks.get(this.state.room)?.group.getObjectByName('home-balcony')) },
       roomAccessories: this.world.chunks.get(this.state.room)?.accessories.children.map((item) => item.userData.source) ?? [],
       roomDesign: roomDesign(this.state.room, this.realm), window: roomWindow(this.state.room, this.realm),
       builtRoomDesign: this.world.chunks.get(this.state.room)?.design,

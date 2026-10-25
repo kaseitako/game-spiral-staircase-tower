@@ -42,7 +42,7 @@ export const sourceRoom = (source: number): number => source - sourceSeed(source
 const sourceKey = (source: number): number => sourceSeed(source) === 0 ? sourceRoom(source) : sourceRoom(source) ^ roomSeed(sourceSeed(source) ^ 0x7f4a7c15);
 export const roomKey = (room: number, realm?: Realm): number => sourceKey(itemSource(room, realm));
 
-export type Place = 'stairs' | 'room' | 'rest';
+export type Place = 'stairs' | 'room' | 'rest' | 'loft' | 'balcony';
 export type RoomKind = 'shelter' | 'empty' | 'weathered' | 'library' | 'greenhouse' | 'studio'
   | 'ruin' | 'camp' | 'dining' | 'mending';
 export type LookMode = 'walk' | 'down' | 'up' | 'far';
@@ -50,11 +50,40 @@ export const ITEM_KINDS = ['cup', 'lantern', 'postcard'] as const;
 export type ItemKind = typeof ITEM_KINDS[number];
 export const ITEM_NAMES: Record<ItemKind, string> = { cup: 'カップ', lantern: 'ランタン', postcard: '絵葉書' };
 /** One find per source room; null means that the player is carrying it. */
-export interface Keepsake { source: number; room: number | null | 'lost'; lit: boolean }
+export interface Keepsake { source: number; room: number | null | 'lost' | 'sold'; lit: boolean }
 export type AccessoryKind = 'hat' | 'flower';
-export interface Accessory { source: number; worn: boolean }
+export interface Accessory { source: number; worn: boolean; sold?: true }
 export const ACCESSORY_NAMES: Record<AccessoryKind, string> = { hat: '旅の帽子', flower: '小さな花' };
 export const WALK_SPEED = { slow: 0.69, normal: 1.02, fast: 2.1 } as const;
+export type Kit = 'shelf' | 'loft' | 'balcony';
+export interface TradeState {
+  coins: number;
+  shelves: number;
+  loft: boolean;
+  balcony: boolean;
+  kits: Record<Kit, number>;
+}
+export const initialTrade = (): TradeState => ({ coins: 0, shelves: 0, loft: false, balcony: false, kits: { shelf: 0, loft: 0, balcony: 0 } });
+export const MAX_COINS = 1_000_000_000;
+export const LOFT_Y = 2.85;
+export const LOFT_SEAT = { x: -0.95, z: -0.25 };
+export const LADDER = { x: 1.1, z: -0.55 };
+export const BALCONY = { minX: 3.3, maxX: 4.72, minZ: -0.03, maxZ: 1.12, x: 3.65, z: 0.5 };
+export const NPC_POSITION = { x: 0.72, z: 1.18 };
+
+export function roomNpc(room: number, realm: Realm) {
+  const block = Math.floor(room / 8);
+  const offset = roomSeed(block ^ roomSeed(roomSeedId(room, realm) ^ 0x36a78b19)) % 8;
+  const detail = roomSeed(roomKey(room, realm) ^ 0x2c1b3c6d);
+  const merchant = room - block * 8 === offset;
+  if (!merchant && detail % 7 !== 0) return null;
+  const lines = merchant
+    ? ['同じものが増えたら、少し分けてくれないか。ここでは、まだ誰かの役に立つ。', '棚とはしご、それに外へ張り出す板もある。狭い塔でも、少しは居場所を増やせる。']
+    : ['上のほうで、明るい部屋を見たよ。もう少し休んだら、また歩こうと思う。', 'ここにいると、急がなくていい気がする。', '前に通ったときも、外は白かった。今日は少し、暖かいね。', '荷物は少ないほうが歩きやすい。でも、手放せないものもあるんだ。'];
+  return { kind: merchant ? 'merchant' as const : 'traveller' as const, name: merchant ? '旅の商人' : '休んでいる旅人', detail, lines, ...NPC_POSITION };
+}
+
+export const displayCapacity = (room: number, realm?: Realm, trade?: TradeState): number => 1 + (realm?.home === room ? trade?.shelves ?? 0 : 0);
 export interface WalkState {
   steps: number;
   direction: number;
@@ -68,7 +97,7 @@ export interface Preferences {
   quality: 'standard' | 'light';
 }
 export interface SavedWalk {
-  version: 5;
+  version: 6;
   state: WalkState;
   preferences: Preferences;
   visitedRooms: number[];
@@ -76,6 +105,7 @@ export interface SavedWalk {
   accessories: Accessory[];
   realm: Realm;
   returning: boolean;
+  trade: TradeState;
 }
 
 export const initialState = (): WalkState => ({
@@ -141,7 +171,7 @@ export function roomCampfire(room: number, realm?: Realm) {
   return { x: 0.20, z: -0.12, r: 0.55, embers: roomDesign(room, realm).layout === 2 };
 }
 
-export function roomObstacles(room: number, realm?: Realm) {
+export function roomObstacles(room: number, realm?: Realm, trade?: TradeState) {
   const obstacles = [
     { x: -0.85, z: -0.7, r: 0.48 }, { x: -0.30, z: 1.38, r: 0.52 }, { x: -1.65, z: 0.65, r: 0.37 },
   ];
@@ -154,15 +184,18 @@ export function roomObstacles(room: number, realm?: Realm) {
   if (kind === 'empty' && roomDesign(room, realm).layout === 2) obstacles.push({ x: -0.20, z: -1.70, r: 0.36 });
   if (kind === 'greenhouse') obstacles.push(...roomPlants(room, realm).map(({ x, z }) => ({ x, z, r: 0.27 })));
   if (accessoryFind(room, [], realm)) obstacles.push({ x: 1.05, z: -1.45, r: 0.41 });
+  if (realm && roomNpc(room, realm)) obstacles.push({ ...NPC_POSITION, r: 0.40 });
+  if (realm && roomNpc(room, realm)?.kind === 'merchant') obstacles.push({ x: 1.38, z: 1.18, r: 0.36 });
+  if (realm?.home === room && trade?.loft) obstacles.push({ ...LADDER, r: 0.17 });
   return obstacles;
 }
 
 /** Slide around furniture without letting a wall-side obstacle push the player outside. */
-export function constrainRoomPosition(room: number, x: number, z: number, realm?: Realm) {
+export function constrainRoomPosition(room: number, x: number, z: number, realm?: Realm, trade?: TradeState) {
   const radius = 1.98;
   const length = Math.hypot(x, z);
   if (length > radius) { x *= radius / length; z *= radius / length; }
-  const obstacles = roomObstacles(room, realm);
+  const obstacles = roomObstacles(room, realm, trade);
   for (let pass = 0; pass < 4; pass++) for (const obstacle of obstacles) {
     const gap = Math.hypot(x - obstacle.x, z - obstacle.z);
     if (gap >= obstacle.r - 1e-8) continue;
@@ -197,8 +230,8 @@ export function accessoryFind(room: number, accessories: Accessory[], realm?: Re
 export const itemKind = (source: number): ItemKind => ITEM_KINDS[(((sourceRoom(source) + sourceSeed(source)) % 3) + 3) % 3];
 export const roomFind = (room: number, keepsakes: Keepsake[], realm?: Realm): Keepsake | null =>
   keepsakes.some((item) => item.source === itemSource(room, realm)) ? null : { source: itemSource(room, realm), room, lit: false };
-export const canPlace = (item: Keepsake, room: number, keepsakes: Keepsake[]): boolean =>
-  item.room === null && !keepsakes.some((other) => other.room === room && itemKind(other.source) === itemKind(item.source));
+export const canPlace = (item: Keepsake, room: number, keepsakes: Keepsake[], realm?: Realm, trade?: TradeState): boolean =>
+  item.room === null && keepsakes.filter((other) => other.room === room && itemKind(other.source) === itemKind(item.source)).length < displayCapacity(room, realm, trade);
 
 const POSTCARDS = [
   { title: '白い午後', text: '窓の向こうは、今日も白い。\nそれでも、昨日とは少し違う気がする。\nここでお茶を飲んでから、また歩こう。', color: '#adb9a0' },
@@ -227,7 +260,7 @@ export function renewTower(saved: SavedWalk): SavedWalk {
       preserved: { room: home, cycle: roomCycle(home, saved.realm), seed: roomSeedId(home, saved.realm) },
     },
     visitedRooms: [home],
-    keepsakes: saved.keepsakes.map((item) => item.room === null || item.room === home ? { ...item } : { ...item, room: 'lost', lit: false }),
+    keepsakes: saved.keepsakes.map((item) => item.room === null || item.room === home || item.room === 'sold' ? { ...item } : { ...item, room: 'lost', lit: false }),
     accessories: saved.accessories.map((item) => ({ ...item })),
   };
 }
@@ -237,11 +270,24 @@ export function parseSave(raw: string | null): SavedWalk | null {
   try {
     const saved = JSON.parse(raw);
     const s = saved?.state;
-    if (![1, 2, 3, 4, 5].includes(saved?.version) || !s || !['stairs', 'room', 'rest'].includes(s.place)) return null;
+    if (![1, 2, 3, 4, 5, 6].includes(saved?.version) || !s || !['stairs', 'room', 'rest', ...(saved.version === 6 ? ['loft', 'balcony'] : [])].includes(s.place)) return null;
     if (![s.steps, s.direction, s.room, s.x, s.z].every((n) => typeof n === 'number' && Number.isFinite(n))) return null;
     if (Math.abs(s.steps) > 1e9 || !Number.isSafeInteger(s.room) || Math.abs(s.room) > 1e7) return null;
     if (s.direction !== 1 && s.direction !== -1) return null;
-    if (Math.hypot(s.x, s.z) > 2.05) return null;
+    if (s.place === 'balcony' ? s.x < BALCONY.minX || s.x > BALCONY.maxX || s.z < BALCONY.minZ || s.z > BALCONY.maxZ : Math.hypot(s.x, s.z) > 2.05) return null;
+    const trade = initialTrade();
+    if (saved.version === 6 && saved.trade) {
+      const t = saved.trade;
+      const integer = (n: unknown, max: number): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 && n <= max;
+      trade.coins = integer(t.coins, MAX_COINS) ? t.coins : 0;
+      trade.shelves = integer(t.shelves, 2) ? t.shelves : 0;
+      trade.loft = t.loft === true;
+      trade.balcony = t.balcony === true;
+      for (const kit of ['shelf', 'loft', 'balcony'] as const) {
+        const limit = kit === 'shelf' ? 2 - trade.shelves : trade[kit] ? 0 : 1;
+        trade.kits[kit] = integer(t.kits?.[kit], limit) ? t.kits[kit] : 0;
+      }
+    }
     const savedSpacing = saved.version === 1 ? 90 : STEPS_PER_ROOM;
     if (s.place !== 'stairs' && Math.abs(s.steps - s.room * savedSpacing) > 0.01) return null;
     const visitedRooms = new Set<number>(Array.isArray(saved.visitedRooms)
@@ -251,7 +297,7 @@ export function parseSave(raw: string | null): SavedWalk | null {
     if (s.place !== 'stairs') visitedRooms.add(s.room);
     const keepsakes: Keepsake[] = [];
     const sources = new Set<number>();
-    const occupied = new Set<string>();
+    const occupied = new Map<string, number>();
     const validRoom = (id: unknown): id is number => typeof id === 'number' && Number.isSafeInteger(id) && Math.abs(id) <= 1e7;
     const validCycle = (cycle: unknown): cycle is number => typeof cycle === 'number' && Number.isSafeInteger(cycle) && cycle >= 0 && cycle <= MAX_CYCLE;
     const validSeed = (seed: unknown): seed is number => typeof seed === 'number' && Number.isSafeInteger(seed) && seed >= 0 && seed <= MAX_SEED;
@@ -264,7 +310,7 @@ export function parseSave(raw: string | null): SavedWalk | null {
       realm.cycle = r.cycle;
       realm.home = r.home;
       realm.seed = r.cycle;
-      if (saved.version === 5) {
+      if (saved.version >= 5) {
         if (!validSeed(r.seed) || !Array.isArray(r.usedSeeds) || r.usedSeeds.length > r.cycle + 1
           || !r.usedSeeds.every((seed: unknown) => validSeed(seed) && seed > MAX_CYCLE)
           || new Set(r.usedSeeds).size !== r.usedSeeds.length) return null;
@@ -274,7 +320,7 @@ export function parseSave(raw: string | null): SavedWalk | null {
       }
       if (r.preserved !== null) {
         if (!r.preserved || !validRoom(r.preserved.room) || !validCycle(r.preserved.cycle) || r.preserved.cycle > r.cycle) return null;
-        const seed = saved.version === 5 ? r.preserved.seed : r.preserved.cycle;
+        const seed = saved.version >= 5 ? r.preserved.seed : r.preserved.cycle;
         if (!validSeed(seed) || (seed <= MAX_CYCLE ? seed !== r.preserved.cycle : !realm.usedSeeds.includes(seed))) return null;
         realm.preserved = { room: r.preserved.room, cycle: r.preserved.cycle, seed };
       }
@@ -286,10 +332,11 @@ export function parseSave(raw: string | null): SavedWalk | null {
     if (saved.version >= 2 && Array.isArray(saved.keepsakes)) for (const item of saved.keepsakes) {
       if (!item || !validSource(item.source) || sources.has(item.source)) continue;
       let room: Keepsake['room'] = saved.version >= 4 && item.room === 'lost' ? 'lost' : validRoom(item.room) ? item.room : null;
+      if (saved.version === 6 && item.room === 'sold') room = 'sold';
       const slot = `${room}:${itemKind(item.source)}`;
       // Repair duplicate placements without throwing away a collected item.
-      if (typeof room === 'number' && occupied.has(slot)) room = null;
-      if (typeof room === 'number') occupied.add(slot);
+      if (typeof room === 'number' && (occupied.get(slot) ?? 0) >= displayCapacity(room, realm, trade)) room = null;
+      if (typeof room === 'number') occupied.set(slot, (occupied.get(slot) ?? 0) + 1);
       sources.add(item.source);
       keepsakes.push({ source: item.source, room, lit: itemKind(item.source) === 'lantern' && typeof room === 'number' && item.lit === true });
     }
@@ -299,14 +346,16 @@ export function parseSave(raw: string | null): SavedWalk | null {
     if (saved.version >= 3 && Array.isArray(saved.accessories)) for (const item of saved.accessories) {
       if (!item || !validSource(item.source) || accessorySources.has(item.source) || !hasAccessory(item.source)) continue;
       const kind = accessoryKind(item.source);
-      const worn = item.worn === true && !wornKinds.has(kind);
+      const sold = saved.version === 6 && item.sold === true;
+      const worn = !sold && item.worn === true && !wornKinds.has(kind);
       if (worn) wornKinds.add(kind);
       accessorySources.add(item.source);
-      accessories.push({ source: item.source, worn });
+      accessories.push({ source: item.source, worn, ...(sold ? { sold: true as const } : {}) });
     }
+    const unavailableExtension = (s.place === 'loft' || s.place === 'balcony') && (realm.home !== s.room || !(s.place === 'loft' ? trade.loft : trade.balcony));
     return {
-      version: 5,
-      state: { steps: s.steps * STEPS_PER_ROOM / savedSpacing, direction: s.direction, room: s.room, place: s.place, x: s.x, z: s.z },
+      version: 6,
+      state: { steps: s.steps * STEPS_PER_ROOM / savedSpacing, direction: s.direction, room: s.room, place: unavailableExtension ? 'room' : s.place, x: unavailableExtension ? 0.95 : s.x, z: unavailableExtension ? 0 : s.z },
       preferences: {
         pace: saved.preferences?.pace === 'fast' ? 'fast' : saved.preferences?.pace === 'normal' ? 'normal' : 'slow',
         quality: saved.preferences?.quality === 'light' ? 'light' : 'standard',
@@ -316,6 +365,7 @@ export function parseSave(raw: string | null): SavedWalk | null {
       accessories,
       realm,
       returning: saved.version >= 4 && saved.returning === true && realm.home !== null,
+      trade,
     };
   } catch { return null; }
 }

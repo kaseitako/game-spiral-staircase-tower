@@ -2,12 +2,13 @@ import * as THREE from 'three';
 import { AccessoryModels } from './accessories.ts';
 import { createWallGeometries } from './architecture.ts';
 import { RoomStories } from './room-stories.ts';
+import { RoomLife } from './room-life.ts';
 import type { Campfire } from './room-stories.ts';
 import {
   INNER_RADIUS, ROOM_HEIGHT, STEP_ANGLE, STEP_HEIGHT, STEPS_PER_ROOM,
-  accessoryFind, accessoryKind, initialRealm, itemKind, postcard, roomDesign, roomFind, roomKey, roomNumber, roomPlants, roomSeed, roomWindow, visibleChunks,
+  accessoryFind, accessoryKind, initialRealm, initialTrade, itemKind, postcard, roomDesign, roomFind, roomKey, roomNpc, roomNumber, roomPlants, roomSeed, roomWindow, visibleChunks,
 } from './model.ts';
-import type { Accessory, Keepsake, Realm, RoomKind } from './model.ts';
+import type { Accessory, Keepsake, Realm, RoomKind, TradeState } from './model.ts';
 
 export const ROOM_NAMES: Record<RoomKind, string> = {
   shelter: '暮らしの名残', empty: '静かな空室', weathered: '風化した部屋',
@@ -33,6 +34,7 @@ interface Chunk {
   keepsakes: THREE.Group;
   accessories: THREE.Group;
   fire: Campfire | null;
+  npc: THREE.Group | null;
   owned: { dispose(): void }[];
 }
 
@@ -47,6 +49,7 @@ export class TowerWorld {
   readonly lamp = new THREE.PointLight('#ffe4b0', 1.1, 6, 2);
   private readonly lanternLight = new THREE.PointLight('#ffc476', 0, 5.5, 2);
   private readonly fireLight = new THREE.PointLight('#ffac56', 0, 4.8, 2);
+  private readonly loftLight = new THREE.PointLight('#ffe9be', 0, 5, 2);
   private keepsakes: Keepsake[] = [];
   private accessories: Accessory[] = [];
   private readonly accessoryModels = new AccessoryModels();
@@ -61,18 +64,22 @@ export class TowerWorld {
   private readonly walls = new Map<string, ReturnType<typeof createWallGeometries>>();
   private readonly step = this.makeStep();
   private readonly stories: RoomStories;
+  private readonly life: RoomLife;
   private readonly realm: Realm;
+  private readonly trade: TradeState;
   private elapsed = 0;
   private anchor = Number.NaN;
 
-  constructor(scene: THREE.Scene, realm = initialRealm()) {
+  constructor(scene: THREE.Scene, realm = initialRealm(), trade = initialTrade()) {
     this.realm = realm;
+    this.trade = trade;
+    this.life = new RoomLife({ box: (group, color, size, position, rotation) => this.box(group, color, size, position, rotation), round: (group, color, size, position) => this.round(group, color, size, position) });
     this.stories = new RoomStories({
       box: (group, color, size, position, rotation) => this.box(group, color, size, position, rotation),
       round: (group, color, size, position) => this.round(group, color, size, position),
       mesh: (geometry, color) => this.mesh(geometry, color),
     }, realm);
-    scene.add(this.group, this.lamp, this.lanternLight, this.fireLight);
+    scene.add(this.group, this.lamp, this.lanternLight, this.fireLight, this.loftLight);
   }
 
   private keep<T extends { dispose(): void }>(resource: T): T {
@@ -150,6 +157,7 @@ export class TowerWorld {
     this.anchor = Number.NaN;
     this.fireLight.intensity = 0;
     this.lanternLight.intensity = 0;
+    this.loftLight.intensity = 0;
   }
 
   illuminate(room: number, origin: number, indoors: boolean, dt: number): void {
@@ -157,11 +165,15 @@ export class TowerWorld {
     const kind = roomDesign(room, this.realm).kind;
     this.lamp.position.set(0.4, room * ROOM_HEIGHT - origin + 2.15, -0.2);
     this.lamp.intensity = kind === 'camp' ? 0 : kind === 'ruin' ? 0.5 : indoors ? 3.5 : 1.5;
-    const lantern = this.keepsakes.find((item) => item.room === room && itemKind(item.source) === 'lantern' && item.lit);
-    this.lanternLight.position.set(0.02, room * ROOM_HEIGHT - origin + 0.99, 1.40);
-    this.lanternLight.intensity = lantern ? 8.5 : 0;
+    const lanterns = this.keepsakes.filter((item) => item.room === room && itemKind(item.source) === 'lantern');
+    const lanternSlot = lanterns.findIndex((item) => item.lit);
+    this.lanternLight.position.set(0.02, room * ROOM_HEIGHT - origin + 0.99 + Math.max(0, lanternSlot) * 0.52, 1.40);
+    this.lanternLight.intensity = lanternSlot >= 0 ? 8.5 : 0;
+    this.loftLight.position.set(0, room * ROOM_HEIGHT - origin + 4.75, 0.1);
+    this.loftLight.intensity = this.realm.home === room && this.trade.loft ? 5 : 0;
     this.fireLight.intensity = 0;
     for (const [id, chunk] of this.chunks) {
+      if (chunk.npc && chunk.interior.visible) chunk.npc.rotation.z = Math.sin(this.elapsed * 0.7 + id) * 0.012;
       if (!chunk.fire || !chunk.interior.visible) continue;
       const intensity = this.stories.animate(chunk.fire, this.elapsed);
       if (id !== room) continue;
@@ -208,12 +220,16 @@ export class TowerWorld {
       item.rotation.y = 0.55;
       chunk.keepsakes.add(item);
     }
+    const slots = { cup: 0, lantern: 0, postcard: 0 };
     for (const record of this.keepsakes) {
       if (record.room !== room) continue;
       const item = this.makeKeepsake(record);
       const kind = itemKind(record.source);
       const [x, y, z] = ITEM_POSITIONS[kind];
-      item.position.set(x, y, z);
+      const slot = slots[kind]++;
+      item.position.set(x, y + slot * 0.52, z);
+      // Stack cards on the clear wall beside the doorway; the rear wall can
+      // be occupied by a bookcase or other generated furniture.
       if (kind === 'postcard') item.rotation.y = -0.51;
       chunk.keepsakes.add(item);
     }
@@ -265,11 +281,13 @@ export class TowerWorld {
     const owned: Chunk['owned'] = [];
     const design = roomDesign(id, this.realm);
     const kind = design.kind;
-    let walls = this.walls.get(design.window);
+    const loft = id === this.realm.home && this.trade.loft;
+    const wallKey = `${design.window}:${loft}`;
+    let walls = this.walls.get(wallKey);
     if (!walls) {
-      walls = createWallGeometries(roomWindow(id, this.realm));
+      walls = createWallGeometries(roomWindow(id, this.realm), loft ? 5.35 : 2.65);
       for (const geometry of Object.values(walls)) this.keep(geometry);
-      this.walls.set(design.window, walls);
+      this.walls.set(wallKey, walls);
     }
     const wall = this.mesh(walls.outside, C.stone);
     wall.name = 'outer-wall';
@@ -317,6 +335,9 @@ export class TowerWorld {
     this.box(group, '#999b87', [0.32, 0.16, 1.43], [2.43, 2.55, 0]);
     this.box(group, '#777a68', [0.12, 0.1, 1.18], [2.32, 0.015, 0]);
     const { interior, fire } = this.buildRoom(group, id);
+    const inhabitant = roomNpc(id, this.realm);
+    const npc = inhabitant ? this.life.npc(interior, inhabitant) : null;
+    if (id === this.realm.home) this.life.home(interior, group, this.trade);
     const keepsakes = new THREE.Group();
     const accessories = new THREE.Group();
     interior.add(keepsakes, accessories);
@@ -340,7 +361,7 @@ export class TowerWorld {
     sign.rotation.y = Math.PI / 2 - 0.36;
     group.add(sign);
     owned.push(texture, signMaterial, signGeometry);
-    const chunk = { group, interior, keepsakes, accessories, fire, owned, design };
+    const chunk = { group, interior, keepsakes, accessories, fire, npc, owned, design };
     this.populateKeepsakes(chunk, id);
     this.populateAccessories(chunk, id);
     return chunk;
@@ -358,7 +379,7 @@ export class TowerWorld {
     group.add(floor);
     const ceiling = this.mesh(this.floor, '#8d927e', THREE.DoubleSide);
     ceiling.rotation.x = Math.PI / 2;
-    ceiling.position.y = 2.65;
+    ceiling.position.y = room === this.realm.home && this.trade.loft ? 5.35 : 2.65;
     group.add(ceiling);
     const furniture = new THREE.Group();
     group.add(furniture);
@@ -557,5 +578,6 @@ export class TowerWorld {
     this.lamp.removeFromParent();
     this.lanternLight.removeFromParent();
     this.fireLight.removeFromParent();
+    this.loftLight.removeFromParent();
   }
 }

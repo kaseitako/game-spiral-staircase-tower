@@ -1,7 +1,10 @@
 import './style.css';
 import { TowerGame } from './game.ts';
-import { ACCESSORY_NAMES, ITEM_NAMES, accessoryColor, accessoryFind, accessoryKind, canPlace, itemKind, postcard, roomFind, roomNumber, sourceRoom } from './model.ts';
-import type { Accessory, AccessoryKind, ItemKind, Keepsake, LookMode, Preferences } from './model.ts';
+import { ACCESSORY_NAMES, ITEM_NAMES, accessoryColor, accessoryFind, accessoryKind, canPlace, displayCapacity, itemKind, postcard, roomFind, roomNumber, sourceRoom } from './model.ts';
+import type { Accessory, AccessoryKind, ItemKind, Keepsake, Kit, LookMode, Preferences } from './model.ts';
+import { KIT_NAMES, KIT_DESCRIPTIONS, kitAvailable, kitPrice, salePrice } from './trade.ts';
+
+const KITS: Kit[] = ['shelf', 'loft', 'balcony'];
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 const towerMark = '<svg viewBox="0 0 32 40" aria-hidden="true"><path d="M12 2v36M20 2v36M5 12l22-7M5 22l22-7M5 32l22-7"/></svg>';
@@ -23,18 +26,22 @@ app.innerHTML = `
       <dl><dt>階段を上る・下る</dt><dd><kbd>W</kbd> <kbd>S</kbd> または <kbd>↑</kbd> <kbd>↓</kbd></dd>
       <dt>部屋の中を歩く</dt><dd><kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> / 矢印キー</dd>
       <dt>入る・座る・立つ・出る</dt><dd>近くで <kbd>E</kbd></dd>
-      <dt>拾う・置く・お茶・着替え</dt><dd><kbd>Q</kbd> で持ち物をひらく<br><kbd>W</kbd> <kbd>S</kbd> で選ぶ・<kbd>E</kbd> で決定</dd>
+      <dt>拾う・置く・お茶・着替え・売買</dt><dd><kbd>Q</kbd> で持ち物をひらく<br><kbd>W</kbd> <kbd>S</kbd> で選ぶ・<kbd>E</kbd> で決定</dd>
+      <dt>旅人や商人と話す</dt><dd>同じ部屋で <kbd>Q</kbd>、または近くで <kbd>E</kbd></dd>
       <dt>早歩きに切り替える</dt><dd><kbd>F</kbd> または画面上の「早歩き」</dd>
       <dt>下・上・遠くを見る</dt><dd><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> ／ 戻る <kbd>Esc</kbd></dd>
       <dt>今いる部屋を自分の家にする</dt><dd>室内で <kbd>T</kbd>。家はひとつだけです。</dd>
       <dt>飛び降りて家へ帰る</dt><dd>階段で <kbd>R</kbd>。先に家を決めてください。</dd>
       <dt>一時停止</dt><dd><kbd>Esc</kbd></dd></dl>
       <p>眺める間は立ち止まります。<br>同じボタンか Esc、歩き出すと元の視点へ。<br>歩いているだけでは階段から落ちません。</p>
-      <p>飛び降りると、しばらく白い靄の中を落ちて家に戻ります。家と持ち物を引き継ぎ、ほかの部屋は入れ替わります。家以外に置いた物には戻れません。訪問数は新しい塔で数え直します。</p>
+      <p>飛び降りると、約5秒の落下後に白い靄の中から家へ戻ります。家と持ち物・コイン・拡張を引き継ぎ、ほかの部屋は入れ替わります。家以外に置いた物には戻れません。訪問数は新しい塔で数え直します。</p>
+      <p>商人は、余った品をコインと交換してくれます。拡張キットを買って家で設置すると、棚やロフト、ベランダを継ぎ足せます。家を変更すると拡張も移ります。</p>
     </aside>
-    <button id="room-discovery" class="room-discovery" hidden><span id="discovery-text"></span><small>部屋のものを見る <kbd>Q</kbd></small></button>
+    <button id="room-discovery" class="room-discovery" hidden><span id="discovery-text"></span><small>部屋でできること <kbd>Q</kbd></small></button>
     <aside id="belongings" class="belongings" aria-label="部屋のものと持ち物" hidden>
       <div class="belongings-heading"><div><span class="eyebrow">LITTLE THINGS</span><p>旅の持ち物</p></div><button id="close-belongings" aria-label="持ち物を閉じる">×</button></div>
+      <p class="wallet">コイン <strong id="coin-count">0</strong> 枚</p>
+      <p id="trade-notice" class="trade-notice" role="status" hidden></p>
       <div id="belongings-content"></div>
       <p class="belongings-foot"><kbd>W</kbd> <kbd>S</kbd> 選ぶ · <kbd>E</kbd> 決定 · <kbd>Q</kbd> 閉じる<br>気に入った部屋に、ひとつ置いていこう。</p>
     </aside>
@@ -50,7 +57,7 @@ app.innerHTML = `
     <aside id="journey-panel" class="journey-panel" aria-label="自分の家と帰宅">
       <p id="home-status">自分の家は、まだありません。</p>
       <button id="mark-home" hidden><span id="home-button-label">ここを自分の家にする</span><kbd>T</kbd></button>
-      <button id="jump" disabled>飛び降りる <kbd>R</kbd></button>
+      <button id="jump" disabled>飛び降りて家に戻る <kbd>R</kbd></button>
       <p id="home-note">部屋に入り、家を決めてください。</p>
     </aside>
     <p id="notice" class="notice" role="status" hidden></p>
@@ -134,16 +141,53 @@ function toggleBelongings(): void {
 function renderBelongings(keepsakes: Keepsake[], accessories: Accessory[], busy: boolean): void {
   const room = game.state.room;
   const indoors = game.state.place !== 'stairs';
-  const signature = JSON.stringify([room, indoors, busy, game.tea, game.realm, keepsakes, accessories]);
+  const baseRoom = game.state.place === 'room' || game.state.place === 'rest';
+  const atHome = indoors && game.realm.home === room;
+  const npc = game.npc;
+  const merchant = npc?.kind === 'merchant';
+  const signature = JSON.stringify([room, game.state.place, busy, game.tea, game.realm, game.trade, game.conversation, keepsakes, accessories]);
   if (signature === belongingsSignature) return;
   belongingsSignature = signature;
   const carried = keepsakes.filter((item) => item.room === null);
+  const ownedAccessories = accessories.filter((item) => !item.sold);
   const button = (label: string, action: string, source?: number, disabled = false, title = '') =>
     `<button data-item-action="${action}"${source === undefined ? '' : ` data-source="${source}"`}${busy || disabled ? ' disabled' : ''}${title ? ` title="${title}"` : ''}>${label}</button>`;
   const row = (item: Keepsake, actions: string, detail: string) => `<div class="keepsake" data-item-source="${item.source}"><div class="keepsake-icon">${itemIcon(itemKind(item.source))}</div><div class="keepsake-description"><strong>${ITEM_NAMES[itemKind(item.source)]}</strong><small>${detail}</small><div class="keepsake-actions">${actions}</div></div></div>`;
   const accessoryRow = (item: Accessory, actions: string, detail: string) => `<div class="keepsake accessory${item.worn ? ' is-worn' : ''}" data-accessory-source="${item.source}"><div class="keepsake-icon" style="--accessory-color:${accessoryColor(item.source)}">${itemIcon(accessoryKind(item.source))}</div><div class="keepsake-description"><strong>${ACCESSORY_NAMES[accessoryKind(item.source)]}${item.worn ? ' <span class="worn-label">着用中</span>' : ''}</strong><small>${detail}</small><div class="keepsake-actions">${actions}</div></div></div>`;
   let markup = '';
-  if (indoors) {
+  if (npc) {
+    markup += `<section class="room-person"><h2>${npc.name}<span>${merchant ? 'TRADER' : 'TRAVELLER'}</span></h2><p class="npc-words">「${game.conversation}」</p><div class="keepsake-actions">${button('話を聞く', 'talk')}</div>`;
+    if (merchant) {
+      const duplicates = game.duplicateFinds;
+      const amount = duplicates.reduce((sum, item) => sum + salePrice(item.source, item.accessory), 0);
+      markup += `<div class="trade-bulk">${button(`ダブり ${duplicates.length} 個を売る · ${amount} 枚`, 'sell-duplicates', undefined, duplicates.length === 0)}<small>持ち物の各種類を1つ残します。帽子と花は、同じ色のダブりだけ。</small></div>`;
+      markup += '<h2>家に継ぎ足すもの</h2>';
+      for (const kit of KITS) {
+        const price = kitPrice(kit, game.trade);
+        const available = kitAvailable(kit, game.trade);
+        const label = available ? `買う · ${price} 枚` : game.trade.kits[kit] ? 'キットを持っています' : '設置済み';
+        markup += `<article class="expansion"><strong>${KIT_NAMES[kit]}</strong><p>${KIT_DESCRIPTIONS[kit]}</p><div class="keepsake-actions">${button(label, `buy-${kit}`, undefined, !available || game.trade.coins < price, available && game.trade.coins < price ? 'コインが足りません' : '')}</div></article>`;
+      }
+    }
+    markup += '</section>';
+  }
+  if (KITS.some((kit) => game.trade.kits[kit] > 0)) {
+    markup += '<section><h2>持ち帰ったキット</h2>';
+    for (const kit of KITS) if (game.trade.kits[kit]) {
+      markup += `<article class="expansion"><strong>${KIT_NAMES[kit]} × ${game.trade.kits[kit]}</strong><div class="keepsake-actions">${button('家に設置する', `install-${kit}`, undefined, !atHome || !baseRoom)}</div></article>`;
+    }
+    if (!atHome || !baseRoom) markup += `<p class="empty-belongings">${game.realm.home === null ? '部屋で T を押して、自分の家を決めましょう。' : '自分の家の室内で設置できます。'}</p>`;
+    markup += '</section>';
+  }
+  if (atHome) {
+    markup += `<section class="home-extensions"><h2>自分の家 <span>飾れる品 各 ${displayCapacity(room, game.realm, game.trade)} 個</span></h2><div class="keepsake-actions">`;
+    if (baseRoom) {
+      if (game.trade.loft) markup += button('ロフトに上がる', 'loft');
+      if (game.trade.balcony) markup += button('ベランダに出る', 'balcony');
+    } else markup += button(game.state.place === 'loft' ? 'はしごを降りる' : '部屋に戻る', 'return-room');
+    markup += '</div></section>';
+  }
+  if (baseRoom) {
     markup += `<section class="room-things"><h2>この部屋 <span>ROOM ${roomNumber(room)}</span></h2>`;
     const found = roomFind(room, keepsakes, game.realm);
     if (found) {
@@ -156,17 +200,21 @@ function renderBelongings(keepsakes: Keepsake[], accessories: Accessory[], busy:
       const kind = itemKind(item.source);
       let actions = kind === 'lantern' ? button(item.lit ? '灯りを消す' : '灯りをつける', 'light', item.source) : '';
       if (kind === 'postcard') actions += button('読む', 'read', item.source);
-      markup += row(item, actions + button('持ち物に戻す', 'take', item.source), kind === 'postcard' ? '壁に飾ってある' : item.lit ? '机の上で灯っている' : '机に置いてある');
+      markup += row(item, actions + button('持ち物に戻す', 'take', item.source), kind === 'postcard' ? '壁に飾ってある' : item.lit ? '灯りをともしている' : '机や棚に置いてある');
     }
     if (!found && !accessory && !placed.length) markup += '<p class="empty-belongings">机と壁に、持ち物を飾れます。</p>';
-    const hasCup = keepsakes.some((item) => itemKind(item.source) === 'cup' && (item.room === null || item.room === room));
-    markup += `<div class="tea-action">${button(game.tea ? '飲み終える' : 'お茶を淹れて休む', game.tea ? 'finish-tea' : 'tea', undefined, !hasCup)}<small>${game.tea ? '湯気を眺めながら、もう少し。' : hasCup ? 'カップと、部屋のポットでひと息。' : 'カップを拾うと、お茶を淹れられます。'}</small></div></section>`;
+    markup += '</section>';
   }
-  if (accessories.length) {
+  if (baseRoom || game.state.place === 'loft') {
+    const hasCup = keepsakes.some((item) => itemKind(item.source) === 'cup' && (item.room === null || item.room === room));
+    markup += `<div class="tea-action">${button(game.tea ? '飲み終える' : 'お茶を淹れて休む', game.tea ? 'finish-tea' : 'tea', undefined, !hasCup)}<small>${game.tea ? '湯気を眺めながら、もう少し。' : hasCup ? 'カップと、部屋のポットでひと息。' : 'カップを拾うと、お茶を淹れられます。'}</small></div>`;
+  }
+  if (ownedAccessories.length) {
     markup += '<section><h2>身につけるもの <span>帽子と花は一緒に</span></h2>';
-    for (const item of accessories) {
+    for (const item of ownedAccessories) {
       const label = item.worn ? 'はずす' : accessoryKind(item.source) === 'hat' ? 'かぶる' : '髪に飾る';
-      markup += accessoryRow(item, button(label, 'wear', item.source), `ROOM ${roomNumber(sourceRoom(item.source))} で見つけた`);
+      const sell = merchant ? button(`売る · ${salePrice(item.source, true)} 枚`, 'sell-accessory', item.source, item.worn, item.worn ? '身につけた品は、はずしてから売れます' : '') : '';
+      markup += accessoryRow(item, button(label, 'wear', item.source) + sell, `ROOM ${roomNumber(sourceRoom(item.source))} で見つけた`);
     }
     markup += '</section>';
   }
@@ -175,7 +223,8 @@ function renderBelongings(keepsakes: Keepsake[], accessories: Accessory[], busy:
   for (const item of carried) {
     const kind = itemKind(item.source);
     let actions = kind === 'postcard' ? button('読む', 'read', item.source) : '';
-    if (indoors) actions += button(kind === 'postcard' ? '壁に飾る' : '机に置く', 'place', item.source, !canPlace(item, room, keepsakes), !canPlace(item, room, keepsakes) ? '同じ種類のものを先に持ち物へ戻してください' : '');
+    if (baseRoom) actions += button(kind === 'postcard' ? '壁に飾る' : atHome && game.trade.shelves ? '机や棚に置く' : '机に置く', 'place', item.source, !canPlace(item, room, keepsakes, game.realm, game.trade), '飾る場所がいっぱいのときは、同じ種類の品を持ち物に戻してください');
+    if (merchant) actions += button(`売る · ${salePrice(item.source)} 枚`, 'sell', item.source);
     markup += row(item, actions, `ROOM ${roomNumber(sourceRoom(item.source))} で見つけた`);
   }
   if (!indoors && carried.length) markup += '<p class="empty-belongings">部屋に入ると、置いたり使ったりできます。</p>';
@@ -230,6 +279,12 @@ function toggleGuide(): void {
   element('help').setAttribute('aria-expanded', String(!guide.hidden));
 }
 
+function interact(): void {
+  const talking = game.action === '商人と話す' || game.action === '話しかける';
+  game.interact();
+  if (talking && belongings.hidden) toggleBelongings();
+}
+
 try {
   game = new TowerGame(element('view'));
   start.disabled = false;
@@ -246,27 +301,30 @@ try {
     text('home-button-label', atHome ? 'ここが自分の家' : 'ここを自分の家にする');
     element<HTMLButtonElement>('jump').hidden = indoors;
     element<HTMLButtonElement>('jump').disabled = !game.canJump;
-    text('home-note', indoors ? atHome ? 'この部屋と、ここに置いた物は残ります。' : game.realm.home === null ? '飛び降りたあと、この部屋に帰ります。' : '家を、この部屋に変更します。' : game.realm.home === null ? '部屋に入り、家を決めてください。' : '家と持ち物を残し、ほかの部屋を入れ替える。');
+    text('home-note', indoors ? atHome ? 'この部屋と、ここに置いた物は残ります。' : game.realm.home === null ? '飛び降りたあと、この部屋に帰ります。' : '家を、この部屋に変更します。' : game.realm.home === null ? '部屋に入り、家を決めてください。' : '約5秒の落下後、家へ戻ります。ほかの部屋は入れ替わります。');
     element<HTMLButtonElement>('inventory-toggle').disabled = falling;
     element<HTMLButtonElement>('fast').disabled = falling;
     element<HTMLButtonElement>('help').disabled = falling;
     text('place-label', placeLabel);
-    text('place-tag', indoors ? `ROOM ${roomNumber(state.room)}${atHome ? ' / HOME' : ''}${state.place === 'rest' ? ' / AT REST' : ''}` : falling ? 'IN THE WHITE' : 'THE STAIRWAY');
+    text('place-tag', indoors ? `ROOM ${roomNumber(state.room)}${atHome ? ' / HOME' : ''}${state.place === 'loft' ? ' / LOFT' : state.place === 'balcony' ? ' / BALCONY' : state.place === 'rest' ? ' / AT REST' : ''}` : falling ? 'IN THE WHITE' : 'THE STAIRWAY');
     text('visited-count', `訪れた部屋 ${visitedCount.toLocaleString('ja-JP')} 室`);
     interaction.hidden = !action || transitioning || !belongings.hidden;
     element('action-label').textContent = action ?? '';
     element('hint').hidden = belongings.hidden && (Boolean(action) || transitioning);
     text('hint', falling ? '白い靄の、その先へ。' : !belongings.hidden ? 'W / S で選ぶ。E で決定、Q で閉じる。' : looking ? 'Esc または同じボタンで戻る。' : indoors ? 'WASD で歩く。椅子のそばで E。' : 'W / S で、上へ、下へ。');
-    text('ambient-note', tea ? '湯気が、ほどけていく。' : state.place === 'rest' ? 'しばらく、このまま。' : '行き先は、ありません。');
+    text('ambient-note', tea ? '湯気が、ほどけていく。' : state.place === 'rest' || state.place === 'loft' ? 'しばらく、このまま。' : state.place === 'balcony' ? '白い靄に、少し近づいた。' : '行き先は、ありません。');
     element('touch-sides').hidden = !indoors;
     text('save-note', saving ? '位置と持ち物は、このブラウザに保存されます。' : 'このブラウザでは位置と持ち物を保存できません。');
-    text('inventory-count', String(keepsakes.filter((item) => item.room === null).length + accessories.length));
-    element('room-discovery').hidden = !indoors || !belongings.hidden || transitioning || looking;
+    text('inventory-count', String(keepsakes.filter((item) => item.room === null).length + accessories.filter((item) => !item.sold).length + KITS.reduce((sum, kit) => sum + game.trade.kits[kit], 0)));
+    text('coin-count', game.trade.coins.toLocaleString('ja-JP'));
+    element('room-discovery').hidden = !indoors || state.place === 'balcony' || state.place === 'loft' || !belongings.hidden || transitioning || looking;
     const found = indoors ? roomFind(state.room, keepsakes, game.realm) : null;
     const accessory = indoors ? accessoryFind(state.room, accessories, game.realm) : null;
-    text('discovery-text', accessory ? `${ACCESSORY_NAMES[accessoryKind(accessory.source)]}を見つけた。` : found ? `${ITEM_NAMES[itemKind(found.source)]}が置いてある。` : 'この部屋で、少し過ごそう。');
+    text('discovery-text', game.npc ? `${game.npc.name}がいる。` : accessory ? `${ACCESSORY_NAMES[accessoryKind(accessory.source)]}を見つけた。` : found ? `${ITEM_NAMES[itemKind(found.source)]}が置いてある。` : 'この部屋で、少し過ごそう。');
     text('notice', notice);
     element('notice').hidden = !notice || !belongings.hidden || reading !== null;
+    text('trade-notice', notice);
+    element('trade-notice').hidden = !notice || belongings.hidden;
     renderBelongings(keepsakes, accessories, transitioning || looking || reading !== null);
     if (reading !== null && reading !== shownPostcard) {
       const card = postcard(reading);
@@ -312,6 +370,19 @@ try {
       case 'finish-tea': game.finishTea(); break;
       case 'take-accessory': game.takeAccessory(source); break;
       case 'wear': game.toggleAccessory(source); break;
+      case 'talk': game.speak(); break;
+      case 'sell': game.sell(source); break;
+      case 'sell-accessory': game.sell(source, true); break;
+      case 'sell-duplicates': game.sellDuplicates(); break;
+      case 'buy-shelf': game.buy('shelf'); break;
+      case 'buy-loft': game.buy('loft'); break;
+      case 'buy-balcony': game.buy('balcony'); break;
+      case 'install-shelf': game.install('shelf'); break;
+      case 'install-loft': game.install('loft'); break;
+      case 'install-balcony': game.install('balcony'); break;
+      case 'loft': game.useExtension('loft'); toggleBelongings(); break;
+      case 'balcony': game.useExtension('balcony'); toggleBelongings(); break;
+      case 'return-room': game.useExtension('room'); toggleBelongings(); break;
     }
   });
   element('fast').addEventListener('click', () => game.toggleFast());
@@ -319,7 +390,7 @@ try {
   element('jump').addEventListener('click', () => { game.jump(); element('jump').blur(); });
   element('look-back').addEventListener('click', () => game.setLook('walk'));
   for (const button of lookButtons) button.addEventListener('click', () => game.setLook(button.dataset.look as LookMode));
-  interaction.addEventListener('click', () => { game.interact(); interaction.blur(); });
+  interaction.addEventListener('click', () => { interact(); interaction.blur(); });
   for (const id of ['pace', 'quality']) element(id).addEventListener('change', () => {
     game.setPreferences({
       pace: element<HTMLSelectElement>('pace').value as Preferences['pace'],
@@ -372,7 +443,7 @@ try {
     if (event.code === 'KeyT' && !event.repeat) { event.preventDefault(); game.markHome(); }
     if (event.code === 'KeyR' && !event.repeat && belongings.hidden && guide.hidden) { event.preventDefault(); game.jump(); }
     if (movement[event.code]) { event.preventDefault(); game.input.add(movement[event.code]); }
-    if (event.code === 'KeyE' && !event.repeat) { event.preventDefault(); game.interact(); }
+    if (event.code === 'KeyE' && !event.repeat) { event.preventDefault(); interact(); }
     if (event.code === 'KeyH' && !event.repeat) toggleGuide();
     if (event.code === 'KeyF' && !event.repeat) { event.preventDefault(); game.toggleFast(); }
     const views: Record<string, LookMode> = { Digit1: 'down', Digit2: 'up', Digit3: 'far', Numpad1: 'down', Numpad2: 'up', Numpad3: 'far' };
