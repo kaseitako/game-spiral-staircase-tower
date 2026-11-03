@@ -10,8 +10,7 @@ coverage/
 .vite/
 *.tsbuildinfo
 
-# Local design notes, screenshots, and development checks
-/docs/
+# Local development checks
 /tests/
 /playwright.config.ts
 
