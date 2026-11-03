@@ -2,6 +2,8 @@
 
 白い靄の中に続く螺旋階段を、上ったり下ったりするブラウザ用の3D散策ゲームです。無音・ローポリ・自動追従カメラで、部屋を訪ねたり、拾った品を飾ったりして過ごせます。
 
+[ブラウザで遊ぶ](https://kaseitako.github.io/game-spiral-staircase-tower/)
+
 スクリーンショットは開発途中のもので、現在の表示と一部異なります。WebGL 2に対応したブラウザが必要です。
 
 ![階段と部屋の入口](docs/images/stairs.png)
@@ -166,6 +168,14 @@ npm run build -- --base=/game-spiral-staircase-tower/
 TypeScript、Vite、Three.jsを使用し、人物・家具・塔はコードで生成しています。
 
 主な動作確認対象は Chromium です。Safari / Firefox と実機でのフレームレートは未検証です。開発用テストはリポジトリに含めていません。
+
+## GitHub Pagesへの公開
+
+- [公開サイト](https://kaseitako.github.io/game-spiral-staircase-tower/)は、`main` へのpush（PRのマージを含む）で自動更新されます。
+- [Deploy to GitHub Pages](https://github.com/kaseitako/game-spiral-staircase-tower/actions/workflows/deploy-pages.yml)から、`main` を選んで手動実行もできます。
+- ワークフローはNode.js 24で `npm ci` と型チェックを含むビルドを実行し、`dist/` のみを公開します。公開パスはPagesの設定から取得します。
+- リポジトリの Settings → Pages → Source は **GitHub Actions** を使用します。追加のシークレット登録は不要です。
+- セーブはブラウザの公開元ごとに保存されるため、ローカル開発版のセーブは公開サイトに自動移行されません。
 
 ## 構成
 
